@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
+    <title>P2P CCTV Server & Viewer</title>
+    <!-- STACK: Vanilla HTML5, no frameworks. We use CDNs for PeerJS (WebRTC) and Tailwind (Styling) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        body { background-color: #111827; color: #f3f4f6; margin: 0; padding: 0; overscroll-behavior: none; }
+        .recording-pulse { box-shadow: 0 0 15px 5px rgba(239, 68, 68, 0.6); }
+        .recording-border { border-color: rgba(239, 68, 68, 0.9) !important; }
+        /* Hide scrollbars for cleaner mobile UX */
+        ::-webkit-scrollbar { width: 0px; background: transparent; }
+    </style>
+</head>
+<body class="flex flex-col h-screen overflow-hidden">
+
+    <!-- MODE SELECTION SCREEN -->
+    <div id="view-select" class="flex flex-col items-center justify-center flex-1 p-6 space-y-6 animate-fade-in z-50">
+        <div class="text-center mb-8">
+            <h1 class="text-4xl font-extrabold tracking-tight mb-2 text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-green-400">P2P Security</h1>
+            <p class="text-gray-400 text-sm">Direct local connection via WebRTC</p>
+        </div>
+        
+        <button onclick="startCameraMode()" class="w-full max-w-sm py-6 bg-gray-800 border-2 border-gray-700 hover:border-blue-500 rounded-2xl flex flex-col items-center justify-center transition-all duration-300 transform active:scale-95 group">
+            <div class="text-5xl mb-3 group-hover:scale-110 transition-transform">📷</div>
+            <span class="text-2xl font-bold">Camera Mode</span>
+            <span class="text-sm text-gray-500 mt-2">Leave this phone at location</span>
+        </button>
+
+        <button onclick="startViewerMode()" class="w-full max-w-sm py-6 bg-gray-800 border-2 border-gray-700 hover:border-green-500 rounded-2xl flex flex-col items-center justify-center transition-all duration-300 transform active:scale-95 group">
+            <div class="text-5xl mb-3 group-hover:scale-110 transition-transform">👁️</div>
+            <span class="text-2xl font-bold">Viewer Mode</span>
+            <span class="text-sm text-gray-500 mt-2">Monitor from your device</span>
+        </button>
+    </div>
+
+    <!-- CAMERA SERVER SCREEN -->
+    <div id="view-camera" class="hidden flex-col h-screen p-3 space-y-3 relative">
+        <div class="flex justify-between items-center bg-gray-800/80 p-4 rounded-xl backdrop-blur-sm shadow-lg border border-gray-700 z-10 mx-1">
+            <div>
+                <div class="text-[10px] uppercase font-bold text-gray-400 tracking-wider">Connection PIN</div>
+                <div id="cam-pin" class="text-4xl font-mono font-bold text-blue-400 tracking-widest text-shadow-sm">------</div>
+            </div>
+            <div class="text-right flex flex-col items-end">
+                <div id="cam-status" class="text-sm font-semibold text-gray-300 flex items-center gap-2">
+                    <span class="relative flex h-3 w-3"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span><span class="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span></span>
+                    Initializing System...
+                </div>
+                <div class="text-xs font-mono text-gray-500 mt-1">Viewer: <span id="cam-viewer-status" class="text-red-400">Disconnected</span></div>
+            </div>
+        </div>
+
+        <div id="cam-video-wrapper" class="flex-1 relative rounded-2xl overflow-hidden border-4 border-gray-800 transition-all duration-300 bg-black shadow-2xl mx-1 mb-2">
+            <video id="server-video" class="w-full h-full object-cover" autoplay playsinline muted></video>
+            
+            <!-- Safe Area Overlays -->
+            <div class="absolute bottom-4 left-4 bg-black/70 px-3 py-1.5 rounded-lg text-xs font-mono font-medium backdrop-blur grid grid-cols-2 gap-x-3 gap-y-1 w-48">
+                <span class="text-gray-400">FPS:</span> <span id="stat-fps" class="text-right text-white">0</span>
+                <span class="text-gray-400">Motion:</span> <span id="stat-motion" class="text-right text-emerald-400">0.0%</span>
+                <span class="text-gray-400">Buffer:</span> <span id="stat-buffer" class="text-right text-yellow-400">0F</span>
+            </div>
+
+            <!-- Recording Indicator -->
+            <div id="cam-rec-indicator" class="hidden absolute top-4 right-4 bg-red-600 px-4 py-1.5 rounded-full text-xs font-bold shadow-lg flex items-center gap-2 recording-pulse">
+                <div class="w-2 h-2 rounded-full bg-white animate-pulse"></div> RECORDING
+            </div>
+        </div>
+
+        <!-- Hidden processing canvases (using opacity-0 so they remain active in background tabs) -->
+        <canvas id="canvas-diff" class="opacity-0 pointer-events-none absolute left-0 top-0 w-[160px] h-[120px]"></canvas>
+        <canvas id="canvas-record" class="opacity-0 pointer-events-none absolute left-0 top-0 w-[640px] h-[480px]"></canvas>
+    </div>
+
+    <!-- VIEWER CLIENT SCREEN -->
+    <div id="view-viewer" class="hidden flex-col h-screen p-3 space-y-3 relative">
+        <!-- Connect Prompt -->
+        <div id="viewer-connect-ui" class="absolute inset-0 z-50 bg-gray-900 flex flex-col justify-center items-center p-6">
+            <div class="bg-gray-800 p-8 rounded-3xl w-full max-w-sm shadow-2xl border border-gray-700 text-center">
+                <h2 class="text-2xl font-bold mb-2">Camera Access</h2>
+                <p class="text-sm text-gray-400 mb-8">Enter the 6-digit PIN displayed on the camera phone</p>
+                <input type="tel" id="viewer-pin" maxlength="6" placeholder="000000" class="text-center w-full p-4 bg-gray-900 border-2 border-gray-600 rounded-xl text-4xl font-mono focus:border-green-500 outline-none mb-6 tracking-widest text-white shadow-inner">
+                <button onclick="connectToCamera()" class="w-full py-4 bg-green-600 hover:bg-green-700 active:bg-green-800 rounded-xl text-xl font-bold shadow-lg transition-colors">Connect to Stream</button>
+            </div>
+        </div>
+
+        <!-- Viewer Live UI -->
+        <div class="flex justify-between items-center bg-gray-800/90 p-4 rounded-xl border border-gray-700 z-10 mx-1">
+            <div>
+                <div class="text-[10px] uppercase font-bold text-gray-400 tracking-wider">Link Quality</div>
+                <div class="flex items-center gap-2">
+                    <div id="viewer-signal-dot" class="w-2 h-2 rounded-full bg-gray-500"></div>
+                    <div id="viewer-ping" class="text-sm font-mono text-gray-300">--- ms</div>
+                </div>
+            </div>
+            <button onclick="sendRemoteCommand('SWITCH_CAM')" class="px-5 py-2.5 bg-gray-700 hover:bg-gray-600 active:bg-gray-800 rounded-lg text-sm font-semibold flex items-center gap-2 transition-colors border border-gray-600">
+                🔄 Switch Cam
+            </button>
+        </div>
+
+        <div class="flex-1 bg-black rounded-2xl overflow-hidden border-2 border-gray-800 relative shadow-2xl mx-1 relative">
+            <video id="client-video" class="w-full h-full object-cover" autoplay playsinline></video>
+            <!-- Blank state -->
+            <div id="client-wait" class="absolute inset-0 flex items-center justify-center flex-col text-gray-500 bg-black/80 backdrop-blur-sm z-10">
+                <svg class="animate-spin h-8 w-8 mb-4 border-t-2 border-r-2 border-white rounded-full" viewBox="0 0 24 24"></svg>
+                Waiting for video stream...
+            </div>
+        </div>
+
+        <!-- Motion Event Gallery -->
+        <div class="h-28 bg-gray-800/50 rounded-xl border border-gray-700 p-2 mx-1 overflow-visible relative flex flex-col">
+            <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2 px-2 flex justify-between">
+                <span>Recent Events</span>
+                <span class="text-[10px] font-normal lowercase bg-gray-700 px-2 py-0.5 rounded">Auto-downloads enabled</span>
+            </div>
+            <div id="viewer-gallery" class="flex-1 overflow-x-auto flex items-center gap-3 px-2 pb-2 scroll-smooth whitespace-nowrap">
+                <div class="text-gray-600 text-xs italic m-auto">No motion detected yet</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MEGA SCRIPT: App Logic, PeerJS, Web Push / SW, Canvas Ring Buffer -->
+    <script>
+        // --- CONSTANTS & CONFIG ---
+        const PEER_CONFIG = {
+            config: {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ]
+            }
+        };
+        const MOTION_THRESHOLD_PCT = 2.0; 
+        const MOTION_COOLDOWN_MS = 10000;
+        const RECORD_W = 640;
+        const RECORD_H = 480;
+        const DIFF_W = 160;
+        const DIFF_H = 120;
+        const TARGET_FPS = 15;
+        const BUFFER_FRAMES = TARGET_FPS * 2; // 2 seconds
+
+        // --- GLOBAL STATE ---
+        let appState = {
+            mode: 'select', // 'camera' | 'viewer'
+            peer: null,
+            conn: null,
+            call: null,
+            localStream: null,
+            facingMode: 'environment', // Rear cam default
+            pin: null,
+            isRecording: false,
+            lastMotion: 0,
+            ringBuffer: [], // Stores ImageData
+            frameCount: 0,
+            lastFpsTime: Date.now()
+        };
+
+        // DOM Elements
+        const elSelect = document.getElementById('view-select');
+        const elCamera = document.getElementById('view-camera');
+        const elViewer = document.getElementById('view-viewer');
+        const srvVideo = document.getElementById('server-video');
+        const cliVideo = document.getElementById('client-video');
+
+        // Canvases
+        const canvasDiff = document.getElementById('canvas-diff');
+        const ctxDiff = canvasDiff.getContext('2d', { willReadFrequently: true });
+        const canvasRec = document.getElementById('canvas-record');
+        const ctxRec = canvasRec.getContext('2d', { willReadFrequently: true });
+        
+        let prevImageData = null;
+        let motionLoopRef = null;
+
+        // --- SERVICE WORKER FOR INLINE PUSH NOTIFICATIONS ---
+        function initServiceWorker() {
+            // Blob trick to load SW without external file
+            const swCode = `
+                self.addEventListener('message', e => {
+                    if(e.data.type === 'SHOW_NOTIFICATION') {
+                        self.registration.showNotification(e.data.title, e.data.options);
+                    }
+                });
+                self.addEventListener('notificationclick', e => {
+                    e.notification.close();
+                    e.waitUntil(clients.matchAll({ type: 'window' }).then(windowClients => {
+                        for (let client of windowClients) {
+                            // Focus existing app tab
+                            if ('focus' in client) return client.focus();
+                        }
+                    }));
+                });
+            `;
+            const blob = new Blob([swCode], { type: 'application/javascript' });
+            const swUrl = URL.createObjectURL(blob);
+            navigator.serviceWorker.register(swUrl).then(reg => {
+                window.swRegistration = reg;
+            }).catch(e => console.warn('SW Register failed (normal locally without HTTPS): ', e));
+            
+            if ('Notification' in window && Notification.permission !== 'granted') {
+                Notification.requestPermission();
+            }
+        }
+        initServiceWorker();
+
+        function triggerLocalPushNotification(title, body) {
+            const opts = {
+                body: body,
+                vibrate: [200, 100, 200, 100, 200, 100, 200],
+                requireInteraction: true
+            };
+            if (window.swRegistration && window.swRegistration.active && Notification.permission === 'granted') {
+                window.swRegistration.active.postMessage({ type: 'SHOW_NOTIFICATION', title, options: opts });
+            } else if (Notification.permission === 'granted') {
+                new Notification(title, opts); // Fallback standard API
+            }
+        }
+
+        // --- COMMON UTILS ---
+        function requestWakeLock() {
+            if ('wakeLock' in navigator) {
+                navigator.wakeLock.request('screen').catch(console.warn);
+            }
+        }
+
+        function toggleScreen(showEl) {
+            elSelect.classList.add('hidden');
+            elCamera.classList.add('hidden');
+            elViewer.classList.add('hidden');
+            showEl.classList.remove('hidden');
+            showEl.classList.add('flex');
+        }
+
+        // ==========================================
+        //  CAMERA SERVER MODE LOGIC
+        // ==========================================
+        async function startCameraMode() {
+            appState.mode = 'camera';
+            toggleScreen(elCamera);
+            requestWakeLock();
+
+            // Set fixed resolution processing
+            canvasDiff.width = DIFF_W; canvasDiff.height = DIFF_H;
+            canvasRec.width = RECORD_W; canvasRec.height = RECORD_H;
+
+            // Generate PIN
+            appState.pin = Math.floor(100000 + Math.random() * 900000).toString();
+            document.getElementById('cam-pin').innerText = appState.pin;
+
+            await requestMobileCamera();
+
+            // Initialize PeerJS as Server
+            appState.peer = new Peer('cctv-srv-' + appState.pin, PEER_CONFIG);
+            
+            appState.peer.on('open', id => {
+                document.getElementById('cam-status').innerText = "Online & Monitoring";
+                document.getElementById('cam-status').classList.replace('text-gray-300', 'text-green-400');
+            });
+
+            appState.peer.on('connection', conn => {
+                // Viewer joined!
+                appState.conn = conn;
+                document.getElementById('cam-viewer-status').innerText = "Connected";
+                document.getElementById('cam-viewer-status').classList.replace('text-red-400', 'text-green-400');
+                
+                // Set up RPC listener
+                conn.on('data', data => handleCameraCommands(data));
+                conn.on('close', () => {
+                    document.getElementById('cam-viewer-status').innerText = "Disconnected";
+                    document.getElementById('cam-viewer-status').classList.replace('text-green-400', 'text-red-400');
+                    appState.conn = null;
+                });
+
+                // Immediately Call the Viewer with Video Stream
+                console.log("Calling viewer to transmit live stream...");
+                appState.call = appState.peer.call(conn.peer, appState.localStream);
+            });
+
+            startMotionDetectionLoop();
+        }
+
+        async function requestMobileCamera() {
+            if (appState.localStream) {
+                appState.localStream.getTracks().forEach(t => t.stop());
+            }
+            try {
+                // Request video + audio, enforcing facing mode
+                appState.localStream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: appState.facingMode, width: { ideal: RECORD_W }, height: { ideal: RECORD_H } },
+                    audio: true
+                });
+                srvVideo.srcObject = appState.localStream;
+            } catch (err) {
+                console.error("Camera access failed", err);
+                alert("Camera and Microphone access is required for CCTV Server mode.");
+            }
+        }
+
+        function handleCameraCommands(data) {
+            if (data.type === 'PING') {
+                appState.conn.send({ type: 'PONG', start: data.start });
+            } else if (data.type === 'SWITCH_CAM') {
+                appState.facingMode = appState.facingMode === 'environment' ? 'user' : 'environment';
+                requestMobileCamera().then(() => {
+                    // Hot-swap stream tracks to active call without disconnecting
+                    if (appState.call && appState.call.peerConnection) {
+                        const videoTrack = appState.localStream.getVideoTracks()[0];
+                        const sender = appState.call.peerConnection.getSenders().find(s => s.track.kind === 'video');
+                        if (sender) sender.replaceTrack(videoTrack);
+                    }
+                });
+            }
+        }
+
+        // --- MOTION DETECTION & BUFFERING ---
+        function startMotionDetectionLoop() {
+            let lastProcessTime = Date.now();
+
+            function frameLoop() {
+                if (appState.mode !== 'camera') return;
+                requestAnimationFrame(frameLoop);
+
+                const now = Date.now();
+                if (now - lastProcessTime < (1000 / TARGET_FPS)) return; // Throttle to 15 FPS
+                lastProcessTime = now;
+
+                // Update FPS Stat
+                appState.frameCount++;
+                if (now - appState.lastFpsTime >= 1000) {
+                    document.getElementById('stat-fps').innerText = appState.frameCount;
+                    appState.frameCount = 0;
+                    appState.lastFpsTime = now;
+                }
+
+                if (!srvVideo.videoWidth) return;
+
+                // 1. Maintain HD Ring Buffer (Only when NOT actively recording motion)
+                if (!appState.isRecording) {
+                    ctxRec.drawImage(srvVideo, 0, 0, RECORD_W, RECORD_H);
+                    const hdFrame = ctxRec.getImageData(0, 0, RECORD_W, RECORD_H);
+                    appState.ringBuffer.push(hdFrame);
+                    if (appState.ringBuffer.length > BUFFER_FRAMES) appState.ringBuffer.shift();
+                    document.getElementById('stat-buffer').innerText = appState.ringBuffer.length + 'F';
+                }
+
+                // 2. Perform low-res diff for Motion Detection
+                ctxDiff.drawImage(srvVideo, 0, 0, DIFF_W, DIFF_H);
+                const currData = ctxDiff.getImageData(0, 0, DIFF_W, DIFF_H);
+
+                if (prevImageData && !appState.isRecording && (now - appState.lastMotion > MOTION_COOLDOWN_MS)) {
+                    let changedPixels = 0;
+                    const len = currData.data.length;
+                    
+                    // Standard fast integer diff loop
+                    for (let i = 0; i < len; i += 4) {
+                        const dr = Math.abs(currData.data[i] - prevImageData.data[i]);
+                        const dg = Math.abs(currData.data[i+1] - prevImageData.data[i+1]);
+                        const db = Math.abs(currData.data[i+2] - prevImageData.data[i+2]);
+                        
+                        // Roughly threshold noise
+                        if (dr + dg + db > 80) changedPixels++;
+                    }
+
+                    const pct = (changedPixels / (len / 4)) * 100;
+                    document.getElementById('stat-motion').innerText = pct.toFixed(1) + '%';
+                    
+                    if (pct > MOTION_THRESHOLD_PCT) {
+                        triggerMotionRecordingEvent();
+                    }
+                }
+                
+                prevImageData = currData;
+            }
+            frameLoop();
+        }
+
+        function triggerMotionRecordingEvent() {
+            if (appState.isRecording) return;
+            console.log("🔥 MOTION DETECTED! Starting recording cascade...");
+            
+            appState.lastMotion = Date.now();
+            appState.isRecording = true;
+            
+            // Visual feedback
+            document.getElementById('cam-rec-indicator').classList.remove('hidden');
+            document.getElementById('cam-video-wrapper').classList.add('recording-border');
+
+            // --- Send initial Push Notification Trigger to Viewer ---
+            // Take quick low-res snapshot to send in notification
+            const thumbUrl = canvasDiff.toDataURL('image/jpeg', 0.5);
+            if (appState.conn && appState.conn.open) {
+                appState.conn.send({ type: 'ALERT', timestamp: Date.now(), title: "Motion Detected!", body: "Recording in progress.", img: thumbUrl });
+            }
+
+            // --- Prepare Media Recorder for merged buffer + live feed ---
+            // Capture the canvas stream at fixed FPS
+            const webmStream = canvasRec.captureStream(TARGET_FPS);
+            // Mix in microphone audio if available
+            if (appState.localStream && appState.localStream.getAudioTracks().length > 0) {
+                webmStream.addTrack(appState.localStream.getAudioTracks()[0]);
+            }
+
+            // Prefer VP8 for maximum WebRTC/mobile HTML5 compatibility
+            const recorder = new MediaRecorder(webmStream, { mimeType: 'video/webm;codecs=vp8,opus' });
+            const chunks = [];
+            recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+            
+            recorder.onstop = () => {
+                const blob = new Blob(chunks, { type: 'video/webm' });
+                // We convert blob to ArrayBuffer, as PeerJS transmits ArrayBuffers incredibly reliably
+                blob.arrayBuffer().then(ab => {
+                    console.log("📦 Dispatching WebM chunk to Viewer. Size:", ab.byteLength);
+                    if (appState.conn && appState.conn.open) {
+                        appState.conn.send({ type: 'VIDEO_CLIP', buffer: ab, timestamp: Date.now(), thumb: thumbUrl });
+                    }
+                });
+
+                // Reset state
+                appState.isRecording = false;
+                appState.ringBuffer = []; // Clear old ring buffer
+                document.getElementById('cam-rec-indicator').classList.add('hidden');
+                document.getElementById('cam-video-wrapper').classList.remove('recording-border');
+                appState.lastMotion = Date.now(); // reset cooldown
+            };
+
+            recorder.start();
+
+            // --- Feed the Canvas Stream ---
+            let bufferIndex = 0;
+            let liveFrames = 0;
+            const maxLiveFrames = TARGET_FPS * 5; // Record 5 seconds *after* the buffer
+
+            function pumpCanvasInjection() {
+                if (!appState.isRecording) return; // safeguard
+
+                if (bufferIndex < appState.ringBuffer.length) {
+                    // Part 1: Flush Ring Buffer (The Pre-event 2 seconds)
+                    ctxRec.putImageData(appState.ringBuffer[bufferIndex], 0, 0);
+                    bufferIndex++;
+                } else if (liveFrames < maxLiveFrames) {
+                    // Part 2: Draw Live Camera (The Post-event 5 seconds)
+                    ctxRec.drawImage(srvVideo, 0, 0, RECORD_W, RECORD_H);
+                    liveFrames++;
+                } else {
+                    // Part 3: Done!
+                    recorder.stop();
+                    return;
+                }
+                
+                // Maintain accurate timing for the captured stream output
+                setTimeout(pumpCanvasInjection, 1000 / TARGET_FPS);
+            }
+            pumpCanvasInjection();
+        }
+
+        // ==========================================
+        //  VIEWER CLIENT MODE LOGIC
+        // ==========================================
+        function startViewerMode() {
+            appState.mode = 'viewer';
+            toggleScreen(elViewer);
+            document.getElementById('viewer-pin').focus();
+        }
+
+        function connectToCamera() {
+            const input = document.getElementById('viewer-pin').value;
+            if(input.length !== 6) return alert("Please enter the 6-digit PIN");
+
+            appState.pin = input;
+            document.getElementById('viewer-connect-ui').classList.add('hidden');
+            requestWakeLock();
+
+            // Initialize local Viewer Peer node
+            appState.peer = new Peer('cctv-viewer-' + Math.floor(Math.random()*10000), PEER_CONFIG);
+            
+            appState.peer.on('open', id => {
+                const targetServer = 'cctv-srv-' + appState.pin;
+                console.log("Connecting to server:", targetServer);
+                
+                // 1. Establish Control Channel (Data)
+                appState.conn = appState.peer.connect(targetServer);
+                
+                appState.conn.on('open', () => {
+                    setupViewerPing();
+                });
+
+                appState.conn.on('data', data => {
+                    if (data.type === 'PONG') {
+                        const rtt = Date.now() - data.start;
+                        document.getElementById('viewer-ping').innerText = rtt + ' ms';
+                        
+                        const dot = document.getElementById('viewer-signal-dot');
+                        dot.className = rtt < 100 ? 'w-2 h-2 rounded-full bg-green-400 shadow-[0_0_8px_theme(colors.green.400)]' : 
+                                      (rtt < 300 ? 'w-2 h-2 rounded-full bg-yellow-400 shadow-[0_0_8px_theme(colors.yellow.400)]' : 
+                                      'w-2 h-2 rounded-full bg-red-400 shadow-[0_0_8px_theme(colors.red.400)]');
+                    }
+                    else if (data.type === 'ALERT') {
+                        triggerLocalPushNotification(data.title, data.body);
+                    }
+                    else if (data.type === 'VIDEO_CLIP') {
+                        triggerLocalPushNotification("File Received", "New footage downloaded.");
+                        handleIncomingVideoData(data.buffer, data.timestamp, data.thumb);
+                    }
+                });
+
+                appState.conn.on('close', () => {
+                    document.getElementById('viewer-ping').innerText = "DISCONNECTED";
+                    document.getElementById('client-wait').classList.remove('hidden');
+                });
+            });
+
+            // 2. Wait for incoming Video Call from Server
+            appState.peer.on('call', call => {
+                console.log("Received media call from server plugin");
+                // WebRTC allows answering even without a local stream if the server doesn't demand reciprocating video
+                call.answer(); 
+                
+                call.on('stream', remoteStream => {
+                    console.log("Live stream established!");
+                    document.getElementById('client-wait').classList.add('hidden');
+                    cliVideo.srcObject = remoteStream;
+                    
+                    // Due to auto-play policies on mobile, user might need a tap interaction
+                    // However, muted autoplay usually works. If we want audio, click might be required.
+                    cliVideo.volume = 1.0; 
+                    cliVideo.play().catch(e => console.log("Autoplay block (handled via UI)", e));
+                });
+            });
+        }
+
+        function setupViewerPing() {
+            setInterval(() => {
+                if (appState.conn && appState.conn.open) {
+                    appState.conn.send({ type: 'PING', start: Date.now() });
+                }
+            }, 2000);
+        }
+
+        function sendRemoteCommand(cmd) {
+            if (appState.conn && appState.conn.open) {
+                appState.conn.send({ type: cmd });
+                document.getElementById('client-wait').classList.remove('hidden');
+                setTimeout(() => document.getElementById('client-wait').classList.add('hidden'), 1000);
+            }
+        }
+
+        function handleIncomingVideoData(arrayBuffer, timestamp, thumbDataUrl) {
+            const blob = new Blob([arrayBuffer], { type: 'video/webm' });
+            const url = URL.createObjectURL(blob);
+            
+            const gallery = document.getElementById('viewer-gallery');
+            if (gallery.innerHTML.includes('No motion')) gallery.innerHTML = ''; // clear placeholder
+
+            // Create Gallery Thumb Tile
+            const docFragment = document.createElement('div');
+            const timeStr = new Date(timestamp).toLocaleTimeString();
+            
+            docFragment.className = "flex-shrink-0 w-24 h-24 bg-gray-900 rounded-lg border-2 border-gray-600 relative overflow-hidden group cursor-pointer shadow-lg hover:border-blue-400 transition-colors";
+            docFragment.innerHTML = `
+                <img src="${thumbDataUrl}" class="absolute inset-0 w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity">
+                <div class="absolute inset-x-0 bottom-0 py-1 bg-gradient-to-t from-black to-transparent text-white text-[9px] text-center font-mono font-bold z-10">${timeStr}</div>
+                <div class="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/10 z-0">
+                    <svg class="w-6 h-6 text-white opacity-80" fill="currentColor" viewBox="0 0 20 20"><path d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd" fill-rule="evenodd"></path></svg>
+                </div>
+            `;
+            
+            // Auto-Download + Click-to-Save Logic
+            const triggerDownload = () => {
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `cctv_motion_${timestamp}.webm`;
+                a.click();
+            };
+            
+            docFragment.onclick = triggerDownload;
+            
+            // Prepend directly so newest is on the left
+            gallery.prepend(docFragment);
+            
+            // Invoke automatic download directly if tab is focused natively
+            try { triggerDownload(); } catch(e){}
+        }
+
+        // Initialize: Show Mode Select natively 
+        toggleScreen(elSelect);
+    </script>
+</body>
+</html>

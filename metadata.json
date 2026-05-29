@@ -1,0 +1,12 @@
+{
+  "name": "CCTV P2P Security",
+  "description": "A standalone, P2P CCTV app using WebRTC, Canvas motion detection, and Vanilla JS.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "notifications"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
